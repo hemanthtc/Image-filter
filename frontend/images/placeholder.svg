@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" width="100%" height="100%">
+  <rect width="400" height="300" fill="#0d111a" rx="8"/>
+  <rect x="20" y="20" width="360" height="260" fill="none" stroke="#1f293d" stroke-dasharray="6,6" rx="6"/>
+  <circle cx="200" cy="130" r="32" fill="#161f30" stroke="#00f2fe" stroke-width="1.5" stroke-opacity="0.4"/>
+  <path d="M188 130 L196 138 L212 122" fill="none" stroke="#00f2fe" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="200" y="190" text-anchor="middle" fill="#586782" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="13" font-weight="500">Awaiting Image Execution</text>
+  <text x="200" y="210" text-anchor="middle" fill="#3b4860" font-family="-apple-system, BlinkMacSystemFont, sans-serif" font-size="11">Select or drop an image above to begin</text>
+</svg>

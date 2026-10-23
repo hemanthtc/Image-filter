@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Module 5: GPU Programming with CUDA - Heterogeneous Computing image processing accelerator and benchmark dashboard.">
+  <title>CUDA Heterogeneous Computing Dashboard | Module 5</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600&family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Navigation Header -->
+    <header class="navbar">
+      <div class="nav-brand">
+        <div class="brand-logo-icon">
+          <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect>
+            <rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect>
+            <line x1="6" y1="6" x2="6.01" y2="6"></line>
+            <line x1="6" y1="18" x2="6.01" y2="18"></line>
+          </svg>
+        </div>
+        <div>
+          <h1 class="brand-title">CUDA ACCELERATOR // MODULE 5</h1>
+          <p class="brand-subtitle">Heterogeneous Computing Benchmark • Host vs Device Pipeline</p>
+        </div>
+      </div>
+
+      <!-- Telemetry Badge for Detected GPU -->
+      <div class="device-telemetry-badge" id="deviceTelemetry">
+        <div class="telemetry-pulse"></div>
+        <div class="telemetry-text">
+          <span class="telemetry-label" id="gpuName">Detecting GPU...</span>
+          <span class="telemetry-sub" id="gpuVram">VRAM: -- | Driver: --</span>
+        </div>
+        <span class="cuda-status-tag" id="cudaStatusTag">CUDA ACTIVE</span>
+      </div>
+    </header>
+
+    <!-- Main Workspace Grid -->
+    <main class="main-content">
+      <!-- Left Column: Configuration & Controls -->
+      <section class="control-panel glass-card">
+        <div class="panel-header">
+          <h2 class="section-title">
+            <span class="title-step">01</span> Execution Pipeline
+          </h2>
+          <span class="badge badge-accent">dim3 2D Layout</span>
+        </div>
+
+        <!-- 1. Image Input / Upload Zone -->
+        <div class="input-section">
+          <label class="control-label">Source Image Input (Host RAM)</label>
+          <div class="upload-dropzone" id="dropZone">
+            <input type="file" id="fileInput" accept=".png,.jpg,.jpeg,.ppm,.bmp,.webp" hidden>
+            <div class="dropzone-content" id="dropzonePrompt">
+              <svg class="upload-icon" viewBox="0 0 24 24" width="36" height="36" stroke="currentColor" stroke-width="1.8" fill="none">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="17 8 12 3 7 8"></polyline>
+                <line x1="12" y1="3" x2="12" y2="15"></line>
+              </svg>
+              <p class="dropzone-title">Drag & Drop or <span class="highlight-link">Browse Image</span></p>
+              <p class="dropzone-meta">Supports PNG, JPG, PPM, BMP</p>
+            </div>
+            <div class="image-preview-loaded hidden" id="previewLoaded">
+              <img id="uploadThumbnail" alt="Preview Thumbnail">
+              <div class="preview-info">
+                <span class="preview-name" id="previewFileName">sample.png</span>
+                <span class="preview-dim" id="previewFileDim">800 × 600 px</span>
+                <button type="button" class="btn-text btn-remove" id="btnRemoveImage">Change Image</button>
+              </div>
+            </div>
+          </div>
+          <div class="quick-sample-row">
+            <button type="button" class="btn btn-secondary btn-sm" id="btnLoadSample">
+              <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><circle cx="12" cy="12" r="10"></circle><polygon points="10 8 16 12 10 16 10 8"></polygon></svg>
+              Load Built-in Sample Image
+            </button>
+          </div>
+        </div>
+
+        <!-- 2. Kernel Operation Selector -->
+        <div class="control-group">
+          <label class="control-label">CUDA Kernel Algorithm</label>
+          <div class="operation-grid">
+            <label class="radio-card selected" id="optGrayscaleCard">
+              <input type="radio" name="operation" value="grayscale" checked>
+              <div class="radio-card-body">
+                <span class="radio-card-title">RGB to Grayscale</span>
+                <span class="radio-card-desc">Luminance mapping: 0.299R + 0.587G + 0.114B</span>
+              </div>
+            </label>
+            <label class="radio-card" id="optConvCard">
+              <input type="radio" name="operation" value="convolution">
+              <div class="radio-card-body">
+                <span class="radio-card-title">2D Image Convolution</span>
+                <span class="radio-card-desc">2D Stencil computation with boundary clamping</span>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <!-- 3. Convolution Filter Sub-selector (Visible only when convolution chosen) -->
+        <div class="control-group hidden" id="convolutionSettings">
+          <label class="control-label" for="filterSelector">Select Stencil Filter</label>
+          <select id="filterSelector" class="form-select">
+            <option value="gaussian_blur_3x3">Gaussian Blur (3×3) — Smooths Noise</option>
+            <option value="gaussian_blur_5x5">Gaussian Blur (5×5) — Deep Blur Neighborhood</option>
+            <option value="box_blur_3x3">Box Blur (3×3) — Uniform Mean Average</option>
+            <option value="sharpen_3x3">Sharpen (3×3) — High-pass Spatial Filter</option>
+            <option value="edge_detection_3x3">Laplacian Edge Detection (3×3)</option>
+            <option value="emboss_3x3">Emboss (3×3) — Directional Relief</option>
+          </select>
+
+          <!-- Interactive Matrix Stencil Preview -->
+          <div class="stencil-viewer">
+            <div class="stencil-header">
+              <span class="stencil-title">Kernel Weights Stencil Matrix</span>
+              <span class="stencil-size-badge" id="stencilSizeBadge">3×3</span>
+            </div>
+            <div class="stencil-matrix" id="stencilMatrixContainer">
+              <!-- Rendered via JS -->
+            </div>
+          </div>
+        </div>
+
+        <!-- 4. CUDA Thread Block Layout (Module 5 Theory) -->
+        <div class="control-group">
+          <div class="control-label-row">
+            <label class="control-label">Thread Block dim3 Layout</label>
+            <span class="tooltip-info" title="Determines thread grouping per Streaming Multiprocessor (SM)">Module 5 BlockDim</span>
+          </div>
+          <div class="block-selector-row">
+            <button type="button" class="btn-block-opt active" data-dim="16">16 × 16 (256 threads)</button>
+            <button type="button" class="btn-block-opt" data-dim="32">32 × 32 (1024 threads)</button>
+            <button type="button" class="btn-block-opt" data-dim="8">8 × 8 (64 threads)</button>
+          </div>
+          <!-- Real-time Grid Calculator Display -->
+          <div class="grid-calc-box">
+            <div class="calc-row">
+              <span class="calc-label">Grid Dimensions (dim3):</span>
+              <span class="calc-val" id="dispGridDim">ceil(W/16) × ceil(H/16) × 1</span>
+            </div>
+            <div class="calc-row">
+              <span class="calc-label">Thread Mapping:</span>
+              <span class="calc-code" id="dispThreadMapping">col = blockIdx.x * 16 + threadIdx.x</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 5. Execution Action Button -->
+        <button type="button" class="btn btn-primary btn-execute" id="btnExecute">
+          <span class="btn-text">
+            <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2.2" fill="none"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+            LAUNCH CUDA & BENCHMARK
+          </span>
+          <div class="spinner hidden" id="btnSpinner"></div>
+        </button>
+      </section>
+
+      <!-- Right Column: Visual Verification & Benchmark Analytics -->
+      <section class="results-panel">
+        <!-- Benchmark Analytics Cards -->
+        <div class="metrics-grid">
+          <!-- CPU Time Card -->
+          <div class="metric-card">
+            <div class="metric-card-top">
+              <span class="metric-label">CPU SEQUENTIAL</span>
+              <span class="metric-tag cpu-tag">Host RAM</span>
+            </div>
+            <div class="metric-value-row">
+              <span class="metric-num" id="valCpuTime">--</span>
+              <span class="metric-unit">ms</span>
+            </div>
+            <span class="metric-desc">Single-threaded CPU baseline</span>
+          </div>
+
+          <!-- GPU Time Card -->
+          <div class="metric-card highlight-gpu">
+            <div class="metric-card-top">
+              <span class="metric-label">GPU CUDA KERNEL</span>
+              <span class="metric-tag gpu-tag">Device VRAM</span>
+            </div>
+            <div class="metric-value-row">
+              <span class="metric-num" id="valGpuTime">--</span>
+              <span class="metric-unit">ms</span>
+            </div>
+            <span class="metric-desc" id="valGpuDesc">Microsecond cudaEvent timing</span>
+          </div>
+
+          <!-- Speedup Factor Card -->
+          <div class="metric-card highlight-speedup">
+            <div class="metric-card-top">
+              <span class="metric-label">SPEEDUP FACTOR</span>
+              <span class="metric-tag speedup-tag">S = T_CPU / T_GPU</span>
+            </div>
+            <div class="metric-value-row">
+              <span class="metric-num accent-glow" id="valSpeedup">--</span>
+              <span class="metric-unit">×</span>
+            </div>
+            <span class="metric-desc" id="valSpeedupDesc">Massively parallel throughput</span>
+          </div>
+
+          <!-- PCIe Transfer Overhead Card -->
+          <div class="metric-card">
+            <div class="metric-card-top">
+              <span class="metric-label">PCIe BUS TRANSFER</span>
+              <span class="metric-tag pci-tag">H2D + D2H</span>
+            </div>
+            <div class="metric-value-row">
+              <span class="metric-num" id="valTransferTime">--</span>
+              <span class="metric-unit">ms</span>
+            </div>
+            <span class="metric-desc" id="valTransferDesc">cudaMemcpy Host ↔ Device</span>
+          </div>
+        </div>
+
+        <!-- Visual Verification Display (Host Input vs Device GPU Output) -->
+        <div class="visual-comparison glass-card">
+          <div class="panel-header">
+            <h2 class="section-title">
+              <span class="title-step">02</span> Visual Verification
+            </h2>
+            <div class="comparison-actions">
+              <button type="button" class="btn btn-secondary btn-sm" id="btnDownloadOutput" disabled>
+                <svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" stroke-width="2" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                Download GPU Output
+              </button>
+            </div>
+          </div>
+
+          <div class="comparison-images-container">
+            <!-- Host Original Image -->
+            <div class="image-frame">
+              <div class="image-frame-header">
+                <span class="frame-label">Host RAM Input (RGB)</span>
+                <span class="frame-badge" id="badgeInputMeta">No Image</span>
+              </div>
+              <div class="image-frame-body">
+                <img id="imgOriginalDisplay" src="/static/images/placeholder.svg" alt="Host Input Image">
+              </div>
+            </div>
+
+            <!-- Device GPU Output Image -->
+            <div class="image-frame">
+              <div class="image-frame-header">
+                <span class="frame-label">Device VRAM Output (GPU Processed)</span>
+                <span class="frame-badge badge-gpu" id="badgeOutputMeta">Awaiting Execution</span>
+              </div>
+              <div class="image-frame-body">
+                <img id="imgProcessedDisplay" src="/static/images/placeholder.svg" alt="GPU Output Image">
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Live Simulated/Real Terminal Console -->
+        <div class="terminal-panel glass-card">
+          <div class="terminal-header">
+            <div class="terminal-title-group">
+              <div class="terminal-dots">
+                <span class="dot dot-red"></span>
+                <span class="dot dot-yellow"></span>
+                <span class="dot dot-green"></span>
+              </div>
+              <span class="terminal-title">CUDA Execution Stream & Driver Log</span>
+            </div>
+            <div class="terminal-controls">
+              <button type="button" class="btn-console-tool" id="btnCopyLogs" title="Copy console logs">Copy</button>
+              <button type="button" class="btn-console-tool" id="btnClearLogs" title="Clear console">Clear</button>
+            </div>
+          </div>
+          <div class="terminal-body" id="terminalOutput">
+            <div class="terminal-line log-system">[SYSTEM] CUDA Heterogeneous Computing Environment Initialized.</div>
+            <div class="terminal-line log-system">[SYSTEM] Ready for Host-Device memory dispatch and kernel launch.</div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Footer Information -->
+    <footer class="footer">
+      <p>Module 5: GPU Programming with CUDA • Heterogeneous Computing • Built for NVIDIA RTX 4050</p>
+      <div class="footer-links">
+        <a href="/api/device-info" target="_blank" class="footer-link">Device Telemetry API</a>
+        <a href="/docs" target="_blank" class="footer-link">Swagger API Docs</a>
+      </div>
+    </footer>
+  </div>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
