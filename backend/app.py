@@ -59,6 +59,12 @@ cuda_engine = CUDAEngine(kernels_dir=KERNELS_DIR)
 mpi_engine = MPIEngine()
 
 
+@app.on_event("shutdown")
+def shutdown_event():
+    """Cleanly terminates MPI worker pools on server shutdown."""
+    mpi_engine.shutdown()
+
+
 @app.get("/api/device-info")
 async def device_info():
     """Returns GPU hardware specifications and driver capabilities, plus MPI status."""

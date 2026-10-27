@@ -25,9 +25,18 @@ import sys
 import time
 import math
 import shutil
+import signal
+import atexit
 import subprocess
 import numpy as np
 from typing import Tuple, List, Dict, Any, Optional
+
+def _silent_worker_init():
+    """Ignore SIGINT in worker processes so Ctrl+C or server shutdown exits cleanly without traceback noise."""
+    try:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    except Exception:
+        pass
 
 # Check for mpi4py availability
 try:
@@ -138,12 +147,25 @@ class MPIEngine:
         self.mpiexec_available = MPIEXEC_PATH is not None
         self.default_ranks = min(4, os.cpu_count() or 4)
         self._pools: Dict[int, Any] = {}
+        atexit.register(self.shutdown)
 
     def _get_executor(self, num_ranks: int):
         from concurrent.futures import ProcessPoolExecutor
         if num_ranks not in self._pools:
-            self._pools[num_ranks] = ProcessPoolExecutor(max_workers=num_ranks)
+            self._pools[num_ranks] = ProcessPoolExecutor(
+                max_workers=num_ranks,
+                initializer=_silent_worker_init
+            )
         return self._pools[num_ranks]
+
+    def shutdown(self):
+        """Cleanly terminates all worker pools without hanging."""
+        for pool in list(self._pools.values()):
+            try:
+                pool.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+        self._pools.clear()
 
     def get_status(self) -> Dict[str, Any]:
         """Returns MPI environment status and detected capabilities."""
