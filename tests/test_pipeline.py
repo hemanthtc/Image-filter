@@ -67,15 +67,37 @@ def run_tests():
     b_conv = conv_data["benchmarks"]
     print(f"[TEST 4 PASS] Convolution CUDA: T_CPU = {b_conv['t_cpu_ms']} ms | T_GPU = {b_conv['t_gpu_kernel_ms']} ms | Speedup = {b_conv['speedup_kernel']}x")
 
-    # 5. Frontend Endpoints
+    # 5. MPI Grayscale Pipeline
+    res_mpi_gray = client.post(
+        "/api/process",
+        files={"file": ("sample.png", img_bytes, "image/png")},
+        data={"operation": "grayscale", "engine": "mpi", "mpi_ranks": "4"}
+    )
+    assert res_mpi_gray.status_code == 200, f"MPI Grayscale failed: {res_mpi_gray.status_code}"
+    mpi_gray_data = res_mpi_gray.json()
+    b_mpi_gray = mpi_gray_data["benchmarks"]
+    print(f"[TEST 5 PASS] Grayscale MPI: T_CPU = {b_mpi_gray['t_cpu_ms']} ms | T_MPI = {b_mpi_gray['t_mpi_compute_ms']} ms | Speedup = {b_mpi_gray['speedup_kernel']}x (Ranks={b_mpi_gray['mpi_ranks']})")
+
+    # 6. MPI Convolution Pipeline with Halo Exchange
+    res_mpi_conv = client.post(
+        "/api/process",
+        files={"file": ("sample.png", img_bytes, "image/png")},
+        data={"operation": "convolution", "filter_name": "gaussian_blur_3x3", "engine": "mpi", "mpi_ranks": "4"}
+    )
+    assert res_mpi_conv.status_code == 200, f"MPI Convolution failed: {res_mpi_conv.status_code}"
+    mpi_conv_data = res_mpi_conv.json()
+    b_mpi_conv = mpi_conv_data["benchmarks"]
+    print(f"[TEST 6 PASS] Convolution MPI: T_CPU = {b_mpi_conv['t_cpu_ms']} ms | T_MPI = {b_mpi_conv['t_mpi_compute_ms']} ms | Speedup = {b_mpi_conv['speedup_kernel']}x (Ranks={b_mpi_conv['mpi_ranks']})")
+
+    # 7. Frontend Endpoints
     res_index = client.get("/")
     assert res_index.status_code == 200, f"Index failed: {res_index.status_code}"
     res_css = client.get("/static/css/style.css")
     assert res_css.status_code == 200, f"CSS failed: {res_css.status_code}"
-    print(f"[TEST 5 PASS] Frontend Dashboard: Index and CSS endpoints operational")
+    print(f"[TEST 7 PASS] Frontend Dashboard: Index and CSS endpoints operational")
 
     print("=" * 70)
-    print("  ALL 5 VERIFICATION TESTS PASSED SUCCESSFULLY!")
+    print("  ALL 7 VERIFICATION TESTS (CUDA + MPI) PASSED SUCCESSFULLY!")
     print("=" * 70)
 
 def test_pipeline():

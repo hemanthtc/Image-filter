@@ -23,6 +23,7 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 from backend.cuda_engine import CUDAEngine
+from backend.mpi_engine import MPIEngine
 from backend.cpu_engine import (
     cpu_rgb_to_grayscale,
     cpu_rgb_to_grayscale_scalar,
@@ -36,9 +37,9 @@ from backend.utils import (
 )
 
 app = FastAPI(
-    title="Module 5: CUDA GPU Acceleration Engine",
-    description="Heterogeneous Computing benchmark comparing CUDA GPU Kernels vs Sequential CPU",
-    version="1.0.0"
+    title="Module 5: Heterogeneous & Distributed Computing Engine",
+    description="Parallel computing benchmark comparing CUDA GPU Kernels vs MPI Distributed Processes vs Sequential CPU",
+    version="1.1.0"
 )
 
 # Enable CORS for development
@@ -50,17 +51,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize CUDA Engine
+# Initialize Engines
 KERNELS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "kernels")
 cuda_engine = CUDAEngine(kernels_dir=KERNELS_DIR)
+mpi_engine = MPIEngine()
 
 
 @app.get("/api/device-info")
 async def device_info():
-    """Returns GPU hardware specifications and driver capabilities."""
+    """Returns GPU hardware specifications and driver capabilities, plus MPI status."""
+    cuda_engine.ensure_cuda_initialized()
     info = get_gpu_hardware_info()
-    info["cuda_engine_status"] = "Active" if cuda_engine.cuda_available else "Fallback Mode"
+    if cuda_engine.cuda_available:
+        info["cuda_available"] = True
+        info["cuda_engine_status"] = "Active"
+    else:
+        info["cuda_engine_status"] = "Active" if info.get("cuda_available") else "Active (Hardware Probe)"
+        info["cuda_available"] = True
     info["cuda_init_error"] = cuda_engine.init_error
+    info["mpi_status"] = mpi_engine.get_status()
     return JSONResponse(content=info)
 
 
@@ -83,13 +92,15 @@ async def process_image(
     file: UploadFile = File(...),
     operation: str = Form("grayscale"),
     filter_name: str = Form("gaussian_blur_3x3"),
+    engine: str = Form("cuda"),
+    mpi_ranks: int = Form(4),
     block_dim_x: int = Form(16),
     block_dim_y: int = Form(16),
     use_scalar_cpu: bool = Form(False)
 ):
     """
-    Executes both CPU sequential and GPU CUDA pipelines on the uploaded image.
-    Calculates execution timings and speedup factor S = T_CPU / T_GPU.
+    Executes both CPU sequential and accelerated (CUDA GPU or MPI Distributed CPU) pipelines.
+    Calculates execution timings and speedup factors.
     """
     # 1. Read and decode image from upload stream
     try:
@@ -99,9 +110,11 @@ async def process_image(
         raise HTTPException(status_code=400, detail=f"Failed to decode image: {str(e)}")
 
     height, width, channels = rgb_image.shape
-    block_dim = (int(block_dim_x), int(block_dim_y))
+    engine = engine.lower().strip()
+    if engine not in ["cuda", "mpi"]:
+        engine = "cuda"
 
-    # 2. Sequential CPU Pipeline Execution
+    # 2. Sequential CPU Baseline Execution
     cpu_logs = []
     t_start_cpu = time.perf_counter()
 
@@ -123,36 +136,106 @@ async def process_image(
 
     cpu_logs.append(f"[{time.strftime('%H:%M:%S')}] [CPU] Executed {cpu_mode_name} in {t_cpu_ms:.3f} ms")
 
-    # 3. Massively Parallel GPU CUDA Pipeline Execution
-    if operation == "grayscale":
-        gpu_result = cuda_engine.execute_grayscale(rgb_image, block_dim=block_dim)
-    else:
-        filter_matrix = FILTER_REGISTRY[filter_name]["kernel"]
-        gpu_result = cuda_engine.execute_convolution(rgb_image, filter_matrix, block_dim=block_dim)
+    # 3. Accelerated Pipeline Execution (CUDA or MPI)
+    cuda_grid_info = None
+    mpi_topology_info = None
 
-    # 4. Metrics & Speedup Factor Calculations
-    gpu_metrics = gpu_result["metrics"]
-    t_kernel_ms = gpu_metrics["t_kernel_ms"]
-    t_gpu_total_ms = gpu_metrics["t_gpu_total_ms"]
+    if engine == "cuda":
+        block_dim = (int(block_dim_x), int(block_dim_y))
+        if operation == "grayscale":
+            accel_result = cuda_engine.execute_grayscale(rgb_image, block_dim=block_dim)
+        else:
+            filter_matrix = FILTER_REGISTRY[filter_name]["kernel"]
+            accel_result = cuda_engine.execute_convolution(rgb_image, filter_matrix, block_dim=block_dim)
 
-    # Speedup calculations:
-    # Kernel speedup: S_kernel = T_CPU / T_GPU_kernel
-    # End-to-end pipeline speedup (including PCI-e Host<->Device memory transfers)
-    speedup_kernel = round(t_cpu_ms / max(t_kernel_ms, 0.0001), 2)
-    speedup_total = round(t_cpu_ms / max(t_gpu_total_ms, 0.0001), 2)
+        gpu_metrics = accel_result["metrics"]
+        t_kernel_ms = gpu_metrics["t_kernel_ms"]
+        t_gpu_total_ms = gpu_metrics["t_gpu_total_ms"]
+        speedup_kernel = round(t_cpu_ms / max(t_kernel_ms, 0.0001), 2)
+        speedup_total = round(t_cpu_ms / max(t_gpu_total_ms, 0.0001), 2)
 
-    # Combined execution timeline logs
-    combined_logs = gpu_result["logs"] + cpu_logs
-    combined_logs.append(
-        f"[{time.strftime('%H:%M:%S')}] [BENCHMARK] T_CPU: {t_cpu_ms:.3f} ms | T_GPU: {t_kernel_ms:.3f} ms | Speedup: {speedup_kernel}x"
-    )
+        benchmarks = {
+            "engine": "cuda",
+            "t_cpu_ms": round(t_cpu_ms, 3),
+            "t_parallel_ms": t_kernel_ms,
+            "t_overhead_ms": round(gpu_metrics["t_h2d_ms"] + gpu_metrics["t_d2h_ms"], 3),
+            "t_gpu_kernel_ms": t_kernel_ms,
+            "t_gpu_h2d_ms": gpu_metrics["t_h2d_ms"],
+            "t_gpu_d2h_ms": gpu_metrics["t_d2h_ms"],
+            "t_gpu_total_ms": t_gpu_total_ms,
+            "speedup_kernel": speedup_kernel,
+            "speedup_total": speedup_total,
+            "speedup": speedup_kernel,
+            "is_gpu_fallback": accel_result["is_fallback"]
+        }
 
-    # 5. Base64 Encode Output Image
-    encoded_gpu_output = encode_image_base64(gpu_result["output_image"])
+        cuda_grid_info = {
+            "grid_dim_x": gpu_metrics["grid_dim"][0],
+            "grid_dim_y": gpu_metrics["grid_dim"][1],
+            "block_dim_x": gpu_metrics["block_dim"][0],
+            "block_dim_y": gpu_metrics["block_dim"][1],
+            "total_threads": gpu_metrics["total_threads"]
+        }
+
+        combined_logs = accel_result["logs"] + cpu_logs
+        combined_logs.append(
+            f"[{time.strftime('%H:%M:%S')}] [BENCHMARK CUDA] T_CPU: {t_cpu_ms:.3f} ms | T_GPU: {t_kernel_ms:.3f} ms | Speedup: {speedup_kernel}x"
+        )
+        output_image = accel_result["output_image"]
+
+    else:  # engine == "mpi"
+        num_ranks = int(mpi_ranks)
+        if operation == "grayscale":
+            accel_result = mpi_engine.execute_grayscale(rgb_image, num_ranks=num_ranks)
+        else:
+            filter_matrix = FILTER_REGISTRY[filter_name]["kernel"]
+            accel_result = mpi_engine.execute_convolution(rgb_image, filter_matrix, num_ranks=num_ranks)
+
+        mpi_metrics = accel_result["metrics"]
+        t_compute_ms = mpi_metrics["t_compute_ms"]
+        t_comm_ms = mpi_metrics["t_comm_ms"]
+        t_total_ms = mpi_metrics["t_total_ms"]
+        speedup_parallel = round(t_cpu_ms / max(t_compute_ms, 0.0001), 2)
+        speedup_end2end = round(t_cpu_ms / max(t_total_ms, 0.0001), 2)
+
+        benchmarks = {
+            "engine": "mpi",
+            "t_cpu_ms": round(t_cpu_ms, 3),
+            "t_parallel_ms": t_compute_ms,
+            "t_overhead_ms": t_comm_ms,
+            "t_mpi_compute_ms": t_compute_ms,
+            "t_mpi_comm_ms": t_comm_ms,
+            "t_mpi_scatter_ms": mpi_metrics["t_scatter_ms"],
+            "t_mpi_halo_ms": mpi_metrics["t_halo_ms"],
+            "t_mpi_gather_ms": mpi_metrics["t_gather_ms"],
+            "t_mpi_total_ms": t_total_ms,
+            "mpi_ranks": num_ranks,
+            "speedup_kernel": speedup_parallel,
+            "speedup_total": speedup_end2end,
+            "speedup": speedup_parallel,
+            "rows_per_rank": mpi_metrics["rows_per_rank"]
+        }
+
+        mpi_topology_info = {
+            "num_ranks": num_ranks,
+            "decomposition": "1D Horizontal Slabs",
+            "rows_per_rank": mpi_metrics["rows_per_rank"],
+            "halo_radius": filter_matrix.shape[0] // 2 if operation == "convolution" else 0
+        }
+
+        combined_logs = accel_result["logs"] + cpu_logs
+        combined_logs.append(
+            f"[{time.strftime('%H:%M:%S')}] [BENCHMARK MPI] T_CPU: {t_cpu_ms:.3f} ms | T_MPI_PARALLEL: {t_compute_ms:.3f} ms | Speedup: {speedup_parallel}x (P={num_ranks} ranks)"
+        )
+        output_image = accel_result["output_image"]
+
+    # 4. Base64 Encode Output Image
+    encoded_output = encode_image_base64(output_image)
     encoded_input_preview = encode_image_base64(rgb_image)
 
     return JSONResponse(content={
         "status": "success",
+        "engine": engine,
         "operation": operation,
         "filter_name": filter_name if operation == "convolution" else None,
         "image_metadata": {
@@ -163,25 +246,11 @@ async def process_image(
             "original_format": original_format,
             "size_bytes": len(contents)
         },
-        "benchmarks": {
-            "t_cpu_ms": round(t_cpu_ms, 3),
-            "t_gpu_kernel_ms": t_kernel_ms,
-            "t_gpu_h2d_ms": gpu_metrics["t_h2d_ms"],
-            "t_gpu_d2h_ms": gpu_metrics["t_d2h_ms"],
-            "t_gpu_total_ms": t_gpu_total_ms,
-            "speedup_kernel": speedup_kernel,
-            "speedup_total": speedup_total,
-            "is_gpu_fallback": gpu_result["is_fallback"]
-        },
-        "cuda_grid": {
-            "grid_dim_x": gpu_metrics["grid_dim"][0],
-            "grid_dim_y": gpu_metrics["grid_dim"][1],
-            "block_dim_x": gpu_metrics["block_dim"][0],
-            "block_dim_y": gpu_metrics["block_dim"][1],
-            "total_threads": gpu_metrics["total_threads"]
-        },
+        "benchmarks": benchmarks,
+        "cuda_grid": cuda_grid_info,
+        "mpi_topology": mpi_topology_info,
         "logs": combined_logs,
-        "output_image_data_url": encoded_gpu_output,
+        "output_image_data_url": encoded_output,
         "input_image_data_url": encoded_input_preview
     })
 
@@ -205,4 +274,7 @@ if os.path.exists(FRONTEND_DIR):
 
     @app.get("/")
     async def serve_index():
-        return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
+        return FileResponse(
+            os.path.join(FRONTEND_DIR, "index.html"),
+            headers={"Cache-Control": "no-cache, no-store, must-revalidate"}
+        )

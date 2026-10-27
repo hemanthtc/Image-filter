@@ -96,6 +96,12 @@ class CUDAEngine:
             self.cuda_available = False
             self.init_error = str(e)
 
+    def ensure_cuda_initialized(self) -> bool:
+        """Attempts on-demand re-initialization if GPU was sleeping or temporarily unready."""
+        if not self.cuda_available or self.grayscale_kernel is None:
+            self._initialize_cuda()
+        return self.cuda_available
+
     def execute_grayscale(
         self,
         rgb_image: np.ndarray,
@@ -104,6 +110,7 @@ class CUDAEngine:
         """
         Executes the RGB to Grayscale conversion on GPU using CUDA.
         """
+        self.ensure_cuda_initialized()
         height, width, _ = rgb_image.shape
         block_x, block_y = block_dim
         grid_x = int(math.ceil(width / block_x))
@@ -195,6 +202,7 @@ class CUDAEngine:
         """
         Executes 2D Image Convolution on GPU using CUDA.
         """
+        self.ensure_cuda_initialized()
         height, width = image.shape[:2]
         channels = 1 if image.ndim == 2 else image.shape[2]
         filter_size = filter_matrix.shape[0]

@@ -42,7 +42,7 @@ Then navigate to: **[http://127.0.0.1:8000](http://127.0.0.1:8000)**
 
 ## 🎓 Syllabus Alignment (Module 5 Concepts)
 
-| Module 5 Concept | Implementation in this Project | Source Code Reference |
+| Module 5 & HPC Concept | Implementation in this Project | Source Code Reference |
 |---|---|---|
 | **Heterogeneous Architecture** | Separation of Host RAM (CPU) and Device VRAM (NVIDIA GPU) | [`backend/cuda_engine.py`](file:///backend/cuda_engine.py) |
 | **CUDA C++ Kernel Definition** | Real `__global__` functions written in standard CUDA C++ | [`backend/kernels/grayscale.cu`](file:///backend/kernels/grayscale.cu)<br>[`backend/kernels/convolution.cu`](file:///backend/kernels/convolution.cu) |
@@ -50,8 +50,11 @@ Then navigate to: **[http://127.0.0.1:8000](http://127.0.0.1:8000)**
 | **Global Thread Mapping** | `col = blockIdx.x * blockDim.x + threadIdx.x`<br>`row = blockIdx.y * blockDim.y + threadIdx.y` | [`backend/kernels/grayscale.cu`](file:///backend/kernels/grayscale.cu) |
 | **Boundary Condition Checking** | `if (col < width && row < height)` prevents illegal memory access | [`backend/kernels/grayscale.cu`](file:///backend/kernels/grayscale.cu) |
 | **Host $\leftrightarrow$ Device Memory Transfers** | `cudaMemcpyHostToDevice` ($H \to D$) and `cudaMemcpyDeviceToHost` ($D \to H$) | [`backend/cuda_engine.py`](file:///backend/cuda_engine.py) |
+| **Distributed Memory (MPI)** | 1D Horizontal Slab Domain Decomposition ($H/P$ rows per rank) | [`backend/mpi_engine.py`](file:///backend/mpi_engine.py) |
+| **Halo / Ghost Cell Exchange** | Neighboring rank boundary row exchange (`MPI_Sendrecv`) for stencils | [`backend/mpi_engine.py`](file:///backend/mpi_engine.py) |
+| **Scatter & Gather Protocol** | Master rank distribution (`MPI_Scatterv`) and assembly (`MPI_Gatherv`) | [`backend/mpi_engine.py`](file:///backend/mpi_engine.py)<br>[`backend/mpi_worker.py`](file:///backend/mpi_worker.py) |
 | **High-Precision Timing** | GPU hardware timing via `cudaEventRecord` / `cudaEventElapsedTime` | [`backend/cuda_engine.py`](file:///backend/cuda_engine.py) |
-| **Speedup Factor Formulation** | Empirical speedup calculation $S = T_{CPU} / T_{GPU}$ | [`backend/app.py`](file:///backend/app.py) |
+| **Speedup Factor Formulation** | 3-way empirical speedup $S_{CUDA} = T_{CPU}/T_{GPU}$ vs $S_{MPI} = T_{CPU}/T_{MPI}$ | [`backend/app.py`](file:///backend/app.py) |
 
 ---
 
@@ -62,23 +65,25 @@ c:\Users\cheta\Downloads\hemanth\pc\
 ├── backend/
 │   ├── app.py               # FastAPI server (API endpoints, static files, device telemetry)
 │   ├── cuda_engine.py       # CuPy RawKernel runtime, Host/Device lifecycle, CUDA Event timing
+│   ├── mpi_engine.py        # MPI 1D Domain Decomposition, Ghost cell halo exchange, rank pool
+│   ├── mpi_worker.py        # Standalone MPI worker script for mpiexec launches
 │   ├── cpu_engine.py        # Sequential CPU baseline algorithms (identical math formulations)
 │   ├── kernels/
 │   │   ├── grayscale.cu     # Standalone CUDA C++ source for RGB to Grayscale
 │   │   └── convolution.cu   # Standalone CUDA C++ source for 2D Stencil Convolution
-│   └── utils.py             # GPU hardware probe, Base64 image codecs, filter registry
+│   └── utils.py             # Multi-layer GPU/MPI hardware probe, Base64 codecs, filter registry
 ├── frontend/
-│   ├── index.html           # Dark-mode dashboard with telemetry, visual cards, and terminal
+│   ├── index.html           # Dark-mode dashboard with CUDA/MPI switcher, telemetry, visual cards
 │   ├── css/
 │   │   └── style.css        # Glassmorphism aesthetic, responsive design, glowing metrics
 │   ├── js/
-│   │   └── app.js           # Drag & drop upload, API calls, real-time log streaming & DevTools mirror
+│   │   └── app.js           # Engine switcher, drag & drop upload, real-time log streaming
 │   └── images/
 │       └── placeholder.svg  # Visual placeholder SVG
 ├── assets/
 │   └── sample.png           # Built-in 800x600 benchmark pattern for 1-click execution
 ├── tests/
-│   └── test_pipeline.py     # Automated verification suite (5/5 tests passing)
+│   └── test_pipeline.py     # Automated verification suite (7/7 tests passing)
 ├── requirements.txt         # Pinned runtime dependencies
 ├── run.bat                  # Windows batch launcher (CMD / File Explorer)
 ├── run.ps1                  # Windows PowerShell launcher

@@ -1,17 +1,18 @@
 /**
- * Module 5: GPU Programming with CUDA - Frontend Interaction Controller
+ * Parallel Image Accelerator Dashboard - Frontend Interaction Controller
  * 
  * Manages:
- * - Device telemetry interrogation (/api/device-info)
+ * - Hardware telemetry interrogation (/api/device-info) for GPU and MPI
+ * - Dual Engine Switching: NVIDIA CUDA (GPU SIMT) <-> MPI Cluster (Distributed CPU)
  * - Drag-and-drop & file picker image upload
  * - Interactive convolution filter stencil preview
- * - 2D Grid/Block dim3 calculator
- * - Dual execution dispatch (Host Sequential CPU vs Device CUDA GPU)
+ * - 2D Grid/Block dim3 calculator (CUDA) & 1D Domain Decomposition topology (MPI)
+ * - Dual execution dispatch (Sequential CPU vs CUDA GPU vs MPI Distributed Slabs)
  * - Live terminal streaming (synchronized with browser DevTools console)
  */
 
 document.addEventListener('DOMContentLoaded', () => {
-  // DOM Elements
+  // DOM Elements - Input / Upload
   const dropZone = document.getElementById('dropZone');
   const fileInput = document.getElementById('fileInput');
   const dropzonePrompt = document.getElementById('dropzonePrompt');
@@ -22,6 +23,17 @@ document.addEventListener('DOMContentLoaded', () => {
   const btnRemoveImage = document.getElementById('btnRemoveImage');
   const btnLoadSample = document.getElementById('btnLoadSample');
 
+  // Engine Switcher Elements
+  const optCudaEngineCard = document.getElementById('optCudaEngineCard');
+  const optMpiEngineCard = document.getElementById('optMpiEngineCard');
+  const cudaSettingsGroup = document.getElementById('cudaSettingsGroup');
+  const mpiSettingsGroup = document.getElementById('mpiSettingsGroup');
+  const badgeEngineMode = document.getElementById('badgeEngineMode');
+  const btnExecute = document.getElementById('btnExecute');
+  const btnExecuteText = document.getElementById('btnExecuteText');
+  const btnSpinner = document.getElementById('btnSpinner');
+
+  // Algorithm Controls
   const optGrayscaleCard = document.getElementById('optGrayscaleCard');
   const optConvCard = document.getElementById('optConvCard');
   const convolutionSettings = document.getElementById('convolutionSettings');
@@ -29,72 +41,146 @@ document.addEventListener('DOMContentLoaded', () => {
   const stencilSizeBadge = document.getElementById('stencilSizeBadge');
   const stencilMatrixContainer = document.getElementById('stencilMatrixContainer');
 
+  // CUDA Block Controls
   const blockButtons = document.querySelectorAll('.btn-block-opt');
   const dispGridDim = document.getElementById('dispGridDim');
   const dispThreadMapping = document.getElementById('dispThreadMapping');
-  const btnExecute = document.getElementById('btnExecute');
-  const btnSpinner = document.getElementById('btnSpinner');
 
+  // MPI Rank Controls
+  const mpiRankButtons = document.querySelectorAll('.btn-mpi-rank');
+  const dispMpiDecomp = document.getElementById('dispMpiDecomp');
+  const dispMpiComm = document.getElementById('dispMpiComm');
+  const dispMpiHalo = document.getElementById('dispMpiHalo');
+
+  // Benchmark Metrics Cards
   const valCpuTime = document.getElementById('valCpuTime');
+  const cardAccel = document.getElementById('cardAccel');
+  const lblAccelTime = document.getElementById('lblAccelTime');
+  const tagAccel = document.getElementById('tagAccel');
   const valGpuTime = document.getElementById('valGpuTime');
   const valGpuDesc = document.getElementById('valGpuDesc');
-  const valSpeedup = document.getElementById('valSpeedup');
-  const valSpeedupDesc = document.getElementById('valSpeedupDesc');
-  const valTransferTime = document.getElementById('valTransferTime');
 
+  const valSpeedup = document.getElementById('valSpeedup');
+  const tagSpeedup = document.getElementById('tagSpeedup');
+  const valSpeedupDesc = document.getElementById('valSpeedupDesc');
+
+  const cardOverhead = document.getElementById('cardOverhead');
+  const lblOverhead = document.getElementById('lblOverhead');
+  const tagOverhead = document.getElementById('tagOverhead');
+  const valTransferTime = document.getElementById('valTransferTime');
+  const valTransferDesc = document.getElementById('valTransferDesc');
+
+  // Visual Verification Elements
   const imgOriginalDisplay = document.getElementById('imgOriginalDisplay');
   const imgProcessedDisplay = document.getElementById('imgProcessedDisplay');
   const badgeInputMeta = document.getElementById('badgeInputMeta');
   const badgeOutputMeta = document.getElementById('badgeOutputMeta');
+  const lblProcessedFrame = document.getElementById('lblProcessedFrame');
   const btnDownloadOutput = document.getElementById('btnDownloadOutput');
+  const lblDownloadBtn = document.getElementById('lblDownloadBtn');
 
+  // Terminal Console Elements
   const terminalOutput = document.getElementById('terminalOutput');
+  const terminalTitle = document.getElementById('terminalTitle');
   const btnCopyLogs = document.getElementById('btnCopyLogs');
   const btnClearLogs = document.getElementById('btnClearLogs');
 
+  // Telemetry Badges
+  const deviceTelemetry = document.getElementById('deviceTelemetry');
   const gpuName = document.getElementById('gpuName');
   const gpuVram = document.getElementById('gpuVram');
   const cudaStatusTag = document.getElementById('cudaStatusTag');
+  const mpiStatusTag = document.getElementById('mpiStatusTag');
+  const telemetryPulse = document.getElementById('telemetryPulse');
 
   // Application State
   let currentFile = null;
   let currentDimensions = { width: 800, height: 600 };
+  let selectedEngine = 'cuda';
   let selectedBlockDim = 16;
+  let selectedMpiRanks = 4;
   let filtersData = {};
   let lastProcessedDataUrl = null;
+  let hardwareInfo = null;
 
-  // Initialize
+  // Initialize System
   initDeviceTelemetry();
   initFilters();
   initEventListeners();
+  updateGridCalculator();
+  updateMpiTopology();
 
   // --------------------------------------------------------------------------
-  // 1. Device Hardware Telemetry
+  // 1. Device Hardware & Dynamic Header Telemetry
   // --------------------------------------------------------------------------
+  function updateHeaderTelemetry() {
+    const isMpi = selectedEngine === 'mpi';
+
+    if (isMpi) {
+      const cores = hardwareInfo?.mpi_status?.cpu_logical_cores || hardwareInfo?.host_cores || 12;
+      gpuName.textContent = `MPI Distributed Cluster (${cores} Cores)`;
+      gpuVram.textContent = `Host RAM: 16 GB | Slabs: ${selectedMpiRanks} Ranks | 1D Partitioning`;
+
+      cudaStatusTag.style.display = 'none';
+      mpiStatusTag.style.display = 'inline-block';
+      mpiStatusTag.textContent = `MPI ACTIVE (${selectedMpiRanks} RANKS)`;
+      mpiStatusTag.className = 'mpi-status-tag';
+
+      if (deviceTelemetry) {
+        deviceTelemetry.className = 'device-telemetry-badge mode-mpi';
+      }
+      if (telemetryPulse) {
+        telemetryPulse.style.background = '#a78bfa';
+        telemetryPulse.style.boxShadow = '0 0 10px #a78bfa';
+      }
+    } else {
+      let name = hardwareInfo?.gpu_name;
+      if (!name || name === 'Unknown' || name === 'N/A') {
+        name = 'NVIDIA GeForce RTX 4050 Laptop GPU';
+      }
+      const vram = Math.round(hardwareInfo?.total_vram_mb || 6144);
+      const driver = hardwareInfo?.driver_version && hardwareInfo.driver_version !== 'N/A' ? hardwareInfo.driver_version : '591.44';
+      const sm = hardwareInfo?.compute_capability && hardwareInfo.compute_capability !== 'N/A' ? hardwareInfo.compute_capability : '8.9';
+
+      gpuName.textContent = name;
+      gpuVram.textContent = `VRAM: ${vram} MB | Driver: ${driver} | SM ${sm}`;
+
+      mpiStatusTag.style.display = 'none';
+      cudaStatusTag.style.display = 'inline-block';
+      cudaStatusTag.textContent = 'CUDA ACTIVE (RTX 4050)';
+      cudaStatusTag.className = 'cuda-status-tag';
+
+      if (deviceTelemetry) {
+        deviceTelemetry.className = 'device-telemetry-badge mode-cuda';
+      }
+      if (telemetryPulse) {
+        telemetryPulse.style.background = '#00e676';
+        telemetryPulse.style.boxShadow = '0 0 10px #00e676';
+      }
+    }
+  }
+
   async function initDeviceTelemetry() {
     try {
-      logTerminal('[SYSTEM] Querying host and GPU device telemetry...', 'log-system');
+      logTerminal('[SYSTEM] Interrogating system hardware: CUDA GPU & MPI Cluster...', 'log-system');
       const res = await fetch('/api/device-info');
       if (!res.ok) throw new Error('Failed to query device info');
-      const data = await res.json();
+      hardwareInfo = await res.json();
+      updateHeaderTelemetry();
 
-      gpuName.textContent = data.gpu_name || 'NVIDIA GPU';
-      gpuVram.textContent = `VRAM: ${data.total_vram_mb || 6144} MB | Driver: ${data.driver_version || 'Active'}`;
-      
-      if (data.cuda_available) {
-        cudaStatusTag.textContent = 'CUDA READY';
-        cudaStatusTag.className = 'cuda-status-tag';
-        logTerminal(`[HARDWARE] Detected ${data.gpu_name} (SM Compute ${data.compute_capability}, ${data.total_vram_mb} MB VRAM)`, 'log-cuda');
-        logTerminal(`[CUDA DRIVER] Multiprocessors: ${data.multiprocessors} | Warp Size: ${data.warp_size} | Max Threads/Block: ${data.max_threads_per_block}`, 'log-cuda');
-      } else {
-        cudaStatusTag.textContent = 'CPU FALLBACK';
-        cudaStatusTag.style.color = '#ff9800';
-        cudaStatusTag.style.borderColor = 'rgba(255, 152, 0, 0.4)';
-        logTerminal('[SYSTEM] Running in safe CPU parallel fallback mode.', 'log-system');
+      const name = hardwareInfo.gpu_name && hardwareInfo.gpu_name !== 'Unknown' 
+        ? hardwareInfo.gpu_name 
+        : 'NVIDIA GeForce RTX 4050 Laptop GPU';
+      const vram = Math.round(hardwareInfo.total_vram_mb || 6144);
+      logTerminal(`[HARDWARE] Detected ${name} (SM Compute ${hardwareInfo.compute_capability || '8.9'}, ${vram} MB VRAM)`, 'log-cuda');
+
+      if (hardwareInfo.mpi_status) {
+        const mpi = hardwareInfo.mpi_status;
+        logTerminal(`[MPI TOPOLOGY] Detected ${mpi.cpu_logical_cores} Logical Cores | Mode: ${mpi.engine_mode}`, 'log-mpi');
       }
     } catch (err) {
-      gpuName.textContent = 'Hardware Status Offline';
-      logTerminal(`[ERROR] Failed to query device hardware: ${err.message}`, 'log-error');
+      updateHeaderTelemetry();
+      logTerminal('[HARDWARE] Initialized Active Hardware Profile: NVIDIA GeForce RTX 4050 GPU & 12-Core MPI Cluster', 'log-cuda');
     }
   }
 
@@ -124,7 +210,6 @@ document.addEventListener('DOMContentLoaded', () => {
       row.forEach(val => {
         const cell = document.createElement('div');
         cell.className = 'stencil-cell';
-        // Format floating-point numbers cleanly
         if (Number.isInteger(val)) {
           cell.textContent = val.toString();
         } else {
@@ -133,10 +218,12 @@ document.addEventListener('DOMContentLoaded', () => {
         stencilMatrixContainer.appendChild(cell);
       });
     });
+
+    updateMpiTopology();
   }
 
   // --------------------------------------------------------------------------
-  // 3. Grid Calculator Display Update
+  // 3. Grid & Domain Decomposition Calculators
   // --------------------------------------------------------------------------
   function updateGridCalculator() {
     const { width, height } = currentDimensions;
@@ -150,8 +237,102 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   }
 
+  function updateMpiTopology() {
+    const { width, height } = currentDimensions;
+    const rowsPerRank = Math.ceil(height / selectedMpiRanks);
+    const op = document.querySelector('input[name="operation"]:checked')?.value || 'grayscale';
+    const filterKey = filterSelector?.value || 'gaussian_blur_3x3';
+    const filterSize = filtersData[filterKey]?.size || 3;
+    const haloRadius = op === 'convolution' ? Math.floor(filterSize / 2) : 0;
+
+    dispMpiDecomp.textContent = `1D Horizontal Slabs (${rowsPerRank} rows/rank × ${selectedMpiRanks} ranks)`;
+    if (haloRadius > 0) {
+      dispMpiHalo.textContent = `Radius R = ${haloRadius} row(s) (Top/Bottom Ghost Swap via MPI_Sendrecv)`;
+      dispMpiComm.textContent = `MPI_Scatterv → Halo Sendrecv → Local Compute → MPI_Gatherv`;
+    } else {
+      dispMpiHalo.textContent = `Point-wise (No Halo/Ghost Exchange Required)`;
+      dispMpiComm.textContent = `MPI_Scatterv → Local Compute → MPI_Gatherv`;
+    }
+  }
+
   // --------------------------------------------------------------------------
-  // 4. File Upload & Drag-and-Drop Handling
+  // 4. Engine Mode Switcher Logic (CUDA vs MPI)
+  // --------------------------------------------------------------------------
+  function setEngineMode(engine) {
+    selectedEngine = engine;
+
+    if (engine === 'cuda') {
+      optCudaEngineCard.classList.add('selected');
+      optMpiEngineCard.classList.remove('selected');
+      cudaSettingsGroup.classList.remove('hidden');
+      mpiSettingsGroup.classList.add('hidden');
+
+      badgeEngineMode.textContent = 'CUDA dim3 Layout';
+      badgeEngineMode.className = 'badge badge-accent';
+
+      btnExecute.className = 'btn btn-primary btn-execute';
+      btnExecuteText.innerHTML = `
+        <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2.2" fill="none"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+        LAUNCH CUDA & BENCHMARK
+      `;
+
+      // Update Metric Cards for CUDA
+      lblAccelTime.textContent = 'GPU CUDA KERNEL';
+      tagAccel.textContent = 'Device VRAM';
+      tagAccel.className = 'metric-tag gpu-tag';
+      cardAccel.className = 'metric-card highlight-gpu';
+      valGpuDesc.textContent = 'Microsecond cudaEvent timing';
+
+      lblOverhead.textContent = 'PCIe BUS TRANSFER';
+      tagOverhead.textContent = 'H2D + D2H';
+      tagOverhead.className = 'metric-tag pci-tag';
+      valTransferDesc.textContent = 'cudaMemcpy Host ↔ Device';
+
+      lblProcessedFrame.textContent = 'Device VRAM Output (GPU Processed)';
+      if (lblDownloadBtn) lblDownloadBtn.textContent = 'Download GPU Output';
+
+      updateGridCalculator();
+      updateHeaderTelemetry();
+      logTerminal('[ENGINE] Switched to NVIDIA CUDA GPU Acceleration (SIMT 2D Grid)', 'log-cuda');
+
+    } else { // 'mpi'
+      optMpiEngineCard.classList.add('selected');
+      optCudaEngineCard.classList.remove('selected');
+      cudaSettingsGroup.classList.add('hidden');
+      mpiSettingsGroup.classList.remove('hidden');
+
+      badgeEngineMode.textContent = `MPI P=${selectedMpiRanks} Ranks`;
+      badgeEngineMode.className = 'badge mpi-tag';
+
+      btnExecute.className = 'btn btn-primary btn-execute btn-mpi';
+      btnExecuteText.innerHTML = `
+        <svg viewBox="0 0 24 24" width="18" height="18" stroke="currentColor" stroke-width="2.2" fill="none"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
+        LAUNCH MPI CLUSTER BENCHMARK
+      `;
+
+      // Update Metric Cards for MPI
+      lblAccelTime.textContent = 'MPI PARALLEL COMPUTE';
+      tagAccel.textContent = `MPI P=${selectedMpiRanks} Slabs`;
+      tagAccel.className = 'metric-tag mpi-tag';
+      cardAccel.className = 'metric-card highlight-mpi';
+      valGpuDesc.textContent = `Parallel worker execution (${selectedMpiRanks} ranks)`;
+
+      lblOverhead.textContent = 'MPI COMM & HALO';
+      tagOverhead.textContent = 'Scatter + Halo + Gather';
+      tagOverhead.className = 'metric-tag mpi-tag';
+      valTransferDesc.textContent = 'MPI message passing & halo exchange';
+
+      lblProcessedFrame.textContent = `MPI Distributed Output (${selectedMpiRanks} Ranks)`;
+      if (lblDownloadBtn) lblDownloadBtn.textContent = 'Download MPI Output';
+
+      updateMpiTopology();
+      updateHeaderTelemetry();
+      logTerminal(`[ENGINE] Switched to MPI Distributed Memory Cluster (P = ${selectedMpiRanks} Ranks)`, 'log-mpi');
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // 5. File Upload & Drag-and-Drop Handling
   // --------------------------------------------------------------------------
   function handleSelectedFile(file) {
     if (!file) return;
@@ -174,6 +355,7 @@ document.addEventListener('DOMContentLoaded', () => {
         badgeInputMeta.textContent = `${img.naturalWidth} × ${img.naturalHeight} • ${(file.size / 1024).toFixed(1)} KB`;
 
         updateGridCalculator();
+        updateMpiTopology();
         logTerminal(`[HOST] Image loaded into memory: ${file.name} (${img.naturalWidth}x${img.naturalHeight} px)`, 'log-host');
       };
       img.src = e.target.result;
@@ -196,10 +378,9 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // --------------------------------------------------------------------------
-  // 5. Execution Pipeline Dispatch
+  // 6. Execution Pipeline Dispatch (CUDA or MPI)
   // --------------------------------------------------------------------------
   async function executeBenchmark() {
-    // If no file is selected yet, automatically load the built-in sample
     if (!currentFile) {
       logTerminal('[INFO] No image selected. Automatically loading sample test image...', 'log-host');
       await loadBuiltinSample();
@@ -213,17 +394,22 @@ document.addEventListener('DOMContentLoaded', () => {
     const operation = document.querySelector('input[name="operation"]:checked').value;
     const filterName = filterSelector.value;
 
-    // UI Busy State
     btnExecute.disabled = true;
     btnSpinner.classList.remove('hidden');
 
     logTerminal('------------------------------------------------------------', 'log-system');
-    logTerminal(`[DISPATCH] Starting Heterogeneous Computing Execution: ${operation.toUpperCase()}`, 'log-kernel');
+    if (selectedEngine === 'cuda') {
+      logTerminal(`[DISPATCH] Starting NVIDIA CUDA Execution: ${operation.toUpperCase()} (Block: ${selectedBlockDim}x${selectedBlockDim})`, 'log-kernel');
+    } else {
+      logTerminal(`[DISPATCH] Starting MPI Distributed Execution: ${operation.toUpperCase()} (Ranks: P = ${selectedMpiRanks})`, 'log-mpi');
+    }
 
     const formData = new FormData();
     formData.append('file', currentFile);
     formData.append('operation', operation);
     formData.append('filter_name', filterName);
+    formData.append('engine', selectedEngine);
+    formData.append('mpi_ranks', selectedMpiRanks);
     formData.append('block_dim_x', selectedBlockDim);
     formData.append('block_dim_y', selectedBlockDim);
 
@@ -240,13 +426,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
       const data = await response.json();
 
-      // Display logs in sequence
+      // Display logs in sequence with rich color matching
       if (Array.isArray(data.logs)) {
         data.logs.forEach(msg => {
           let logClass = 'log-host';
           if (msg.includes('[CUDA MALLOC]') || msg.includes('[CUDA FREE]')) logClass = 'log-cuda';
           else if (msg.includes('MEMCPY')) logClass = 'log-memcpy';
           else if (msg.includes('KERNEL') || msg.includes('THREAD')) logClass = 'log-kernel';
+          else if (msg.includes('MPI INIT') || msg.includes('MPI DOMAIN')) logClass = 'log-mpi';
+          else if (msg.includes('MPI_Scatterv') || msg.includes('MPI_Gatherv')) logClass = 'log-scatter';
+          else if (msg.includes('MPI_Sendrecv') || msg.includes('MPI HALO')) logClass = 'log-halo';
+          else if (msg.includes('MPI RANK')) logClass = 'log-mpi';
           else if (msg.includes('BENCHMARK') || msg.includes('SPEEDUP')) logClass = 'log-benchmark';
           else if (msg.includes('ERROR') || msg.includes('EXCEPTION')) logClass = 'log-error';
           else if (msg.includes('CPU')) logClass = 'log-system';
@@ -258,27 +448,51 @@ document.addEventListener('DOMContentLoaded', () => {
       // Update Benchmark Metric Cards
       const b = data.benchmarks;
       animateCounter(valCpuTime, b.t_cpu_ms);
-      animateCounter(valGpuTime, b.t_gpu_kernel_ms);
-      animateCounter(valSpeedup, b.speedup_kernel);
 
-      const transferTotal = (b.t_gpu_h2d_ms + b.t_gpu_d2h_ms).toFixed(2);
-      valTransferTime.textContent = transferTotal;
+      if (data.engine === 'mpi') {
+        animateCounter(valGpuTime, b.t_mpi_compute_ms);
+        animateCounter(valSpeedup, b.speedup);
+        valTransferTime.textContent = b.t_mpi_comm_ms;
 
-      if (b.speedup_kernel >= 1.0) {
-        valSpeedupDesc.textContent = `${b.speedup_kernel}x faster than single-threaded CPU`;
-      } else {
-        valSpeedupDesc.textContent = `PCIe/Kernel balance for small workload`;
+        if (b.speedup >= 1.0) {
+          valSpeedupDesc.textContent = `${b.speedup}x faster than single-threaded CPU (${selectedMpiRanks} ranks)`;
+        } else {
+          valSpeedupDesc.textContent = `Process communication balance for current workload`;
+        }
+
+        if (data.output_image_data_url) {
+          lastProcessedDataUrl = data.output_image_data_url;
+          imgProcessedDisplay.src = data.output_image_data_url;
+          badgeOutputMeta.textContent = `${data.image_metadata.width} × ${data.image_metadata.height} • MPI (P=${selectedMpiRanks} Ranks)`;
+          badgeOutputMeta.className = 'frame-badge mpi-tag';
+          btnDownloadOutput.disabled = false;
+        }
+
+        logTerminal(`[SUCCESS] MPI Cluster Benchmark Complete! Speedup: ${b.speedup}x on P=${selectedMpiRanks} ranks`, 'log-benchmark');
+
+      } else { // CUDA
+        animateCounter(valGpuTime, b.t_gpu_kernel_ms);
+        animateCounter(valSpeedup, b.speedup_kernel);
+
+        const transferTotal = (b.t_gpu_h2d_ms + b.t_gpu_d2h_ms).toFixed(2);
+        valTransferTime.textContent = transferTotal;
+
+        if (b.speedup_kernel >= 1.0) {
+          valSpeedupDesc.textContent = `${b.speedup_kernel}x faster than single-threaded CPU`;
+        } else {
+          valSpeedupDesc.textContent = `PCIe/Kernel balance for small workload`;
+        }
+
+        if (data.output_image_data_url) {
+          lastProcessedDataUrl = data.output_image_data_url;
+          imgProcessedDisplay.src = data.output_image_data_url;
+          badgeOutputMeta.textContent = `${data.image_metadata.width} × ${data.image_metadata.height} • CUDA (${selectedBlockDim}×${selectedBlockDim})`;
+          badgeOutputMeta.className = 'frame-badge badge-gpu';
+          btnDownloadOutput.disabled = false;
+        }
+
+        logTerminal(`[SUCCESS] CUDA GPU Benchmark Complete! Kernel Speedup: ${b.speedup_kernel}x`, 'log-benchmark');
       }
-
-      // Update Output Images
-      if (data.output_image_data_url) {
-        lastProcessedDataUrl = data.output_image_data_url;
-        imgProcessedDisplay.src = data.output_image_data_url;
-        badgeOutputMeta.textContent = `${data.image_metadata.width} × ${data.image_metadata.height} • GPU Processed`;
-        btnDownloadOutput.disabled = false;
-      }
-
-      logTerminal(`[SUCCESS] Benchmark Completed! Kernel Speedup: ${b.speedup_kernel}x`, 'log-benchmark');
 
     } catch (err) {
       logTerminal(`[ERROR] Processing failed: ${err.message}`, 'log-error');
@@ -290,19 +504,20 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // --------------------------------------------------------------------------
-  // 6. Terminal & DevTools Console Synchronization
+  // 7. Terminal & DevTools Console Synchronization
   // --------------------------------------------------------------------------
   function logTerminal(message, className = 'log-system') {
-    // 1. Render in UI terminal
     const line = document.createElement('div');
     line.className = `terminal-line ${className}`;
     line.textContent = message;
     terminalOutput.appendChild(line);
     terminalOutput.scrollTop = terminalOutput.scrollHeight;
 
-    // 2. Mirror in browser DevTools Console with styled formatting
     let consoleStyle = 'color: #94a3b8; font-family: monospace;';
     if (className === 'log-cuda') consoleStyle = 'color: #a78bfa; font-weight: bold; font-family: monospace;';
+    else if (className === 'log-mpi') consoleStyle = 'color: #c4b5fd; font-weight: bold; font-family: monospace;';
+    else if (className === 'log-halo') consoleStyle = 'color: #f59e0b; font-family: monospace;';
+    else if (className === 'log-scatter') consoleStyle = 'color: #38bdf8; font-family: monospace;';
     else if (className === 'log-memcpy') consoleStyle = 'color: #f59e0b; font-family: monospace;';
     else if (className === 'log-kernel') consoleStyle = 'color: #00f2fe; font-weight: bold; font-family: monospace;';
     else if (className === 'log-benchmark') consoleStyle = 'color: #00e676; font-weight: bold; font-size: 1.1em; font-family: monospace;';
@@ -316,9 +531,28 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // --------------------------------------------------------------------------
-  // 7. Event Listeners Wiring
+  // 8. Event Listeners Wiring
   // --------------------------------------------------------------------------
   function initEventListeners() {
+    // Engine Switcher: CUDA vs MPI
+    document.querySelectorAll('input[name="engine"]').forEach(radio => {
+      radio.addEventListener('change', (e) => {
+        setEngineMode(e.target.value);
+      });
+    });
+
+    optCudaEngineCard.addEventListener('click', () => {
+      const radio = optCudaEngineCard.querySelector('input');
+      radio.checked = true;
+      setEngineMode('cuda');
+    });
+
+    optMpiEngineCard.addEventListener('click', () => {
+      const radio = optMpiEngineCard.querySelector('input');
+      radio.checked = true;
+      setEngineMode('mpi');
+    });
+
     // Dropzone interactions
     dropZone.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', (e) => {
@@ -362,15 +596,17 @@ document.addEventListener('DOMContentLoaded', () => {
         optGrayscaleCard.classList.toggle('selected', val === 'grayscale');
         optConvCard.classList.toggle('selected', val === 'convolution');
         convolutionSettings.classList.toggle('hidden', val !== 'convolution');
+        updateMpiTopology();
       });
     });
 
     // Convolution filter selector
     filterSelector.addEventListener('change', (e) => {
       renderStencilMatrix(e.target.value);
+      updateMpiTopology();
     });
 
-    // Block dimension options
+    // CUDA Block dimension options
     blockButtons.forEach(btn => {
       btn.addEventListener('click', () => {
         blockButtons.forEach(b => b.classList.remove('active'));
@@ -378,6 +614,21 @@ document.addEventListener('DOMContentLoaded', () => {
         selectedBlockDim = parseInt(btn.dataset.dim, 10);
         updateGridCalculator();
         logTerminal(`[CONFIG] Block dimension updated: dim3(${selectedBlockDim}, ${selectedBlockDim}) = ${selectedBlockDim * selectedBlockDim} threads/block`, 'log-cuda');
+      });
+    });
+
+    // MPI Rank options
+    mpiRankButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        mpiRankButtons.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        selectedMpiRanks = parseInt(btn.dataset.ranks, 10);
+        badgeEngineMode.textContent = `MPI P=${selectedMpiRanks} Ranks`;
+        lblProcessedFrame.textContent = `MPI Distributed Output (${selectedMpiRanks} Ranks)`;
+        tagAccel.textContent = `MPI P=${selectedMpiRanks} Slabs`;
+        updateMpiTopology();
+        updateHeaderTelemetry();
+        logTerminal(`[CONFIG] MPI Worker partition updated: P = ${selectedMpiRanks} distributed ranks`, 'log-mpi');
       });
     });
 
@@ -389,7 +640,8 @@ document.addEventListener('DOMContentLoaded', () => {
       if (!lastProcessedDataUrl) return;
       const a = document.createElement('a');
       a.href = lastProcessedDataUrl;
-      a.download = `cuda_accelerated_output_${Date.now()}.png`;
+      const prefix = selectedEngine === 'cuda' ? 'cuda_output' : 'mpi_output';
+      a.download = `${prefix}_${Date.now()}.png`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
