@@ -57,15 +57,16 @@ def run_tests():
     print(f"[TEST 3 PASS] Grayscale CUDA: T_CPU = {b_gray['t_cpu_ms']} ms | T_GPU = {b_gray['t_gpu_kernel_ms']} ms | Speedup = {b_gray['speedup_kernel']}x")
 
     # 4. Convolution Pipeline
-    res_conv = client.post(
-        "/api/process",
-        files={"file": ("sample.png", img_bytes, "image/png")},
-        data={"operation": "convolution", "filter_name": "gaussian_blur_3x3", "block_dim_x": "16", "block_dim_y": "16"}
-    )
-    assert res_conv.status_code == 200, f"Convolution pipeline failed: {res_conv.status_code}"
-    conv_data = res_conv.json()
-    b_conv = conv_data["benchmarks"]
-    print(f"[TEST 4 PASS] Convolution CUDA: T_CPU = {b_conv['t_cpu_ms']} ms | T_GPU = {b_conv['t_gpu_kernel_ms']} ms | Speedup = {b_conv['speedup_kernel']}x")
+    # 4. Convolution Pipeline (CUDA - All 6 filters)
+    from backend.utils import FILTER_REGISTRY
+    for f_name in FILTER_REGISTRY:
+        res_conv = client.post(
+            "/api/process",
+            files={"file": ("sample.png", img_bytes, "image/png")},
+            data={"operation": "convolution", "filter_name": f_name, "block_dim_x": "16", "block_dim_y": "16"}
+        )
+        assert res_conv.status_code == 200, f"CUDA Convolution failed for {f_name}: {res_conv.status_code}"
+    print(f"[TEST 4 PASS] Convolution CUDA: All {len(FILTER_REGISTRY)} filters executed successfully")
 
     # 5. MPI Grayscale Pipeline
     res_mpi_gray = client.post(
@@ -78,16 +79,15 @@ def run_tests():
     b_mpi_gray = mpi_gray_data["benchmarks"]
     print(f"[TEST 5 PASS] Grayscale MPI: T_CPU = {b_mpi_gray['t_cpu_ms']} ms | T_MPI = {b_mpi_gray['t_mpi_compute_ms']} ms | Speedup = {b_mpi_gray['speedup_kernel']}x (Ranks={b_mpi_gray['mpi_ranks']})")
 
-    # 6. MPI Convolution Pipeline with Halo Exchange
-    res_mpi_conv = client.post(
-        "/api/process",
-        files={"file": ("sample.png", img_bytes, "image/png")},
-        data={"operation": "convolution", "filter_name": "gaussian_blur_3x3", "engine": "mpi", "mpi_ranks": "4"}
-    )
-    assert res_mpi_conv.status_code == 200, f"MPI Convolution failed: {res_mpi_conv.status_code}"
-    mpi_conv_data = res_mpi_conv.json()
-    b_mpi_conv = mpi_conv_data["benchmarks"]
-    print(f"[TEST 6 PASS] Convolution MPI: T_CPU = {b_mpi_conv['t_cpu_ms']} ms | T_MPI = {b_mpi_conv['t_mpi_compute_ms']} ms | Speedup = {b_mpi_conv['speedup_kernel']}x (Ranks={b_mpi_conv['mpi_ranks']})")
+    # 6. MPI Convolution Pipeline with Halo Exchange (All 6 filters)
+    for f_name in FILTER_REGISTRY:
+        res_mpi_conv = client.post(
+            "/api/process",
+            files={"file": ("sample.png", img_bytes, "image/png")},
+            data={"operation": "convolution", "filter_name": f_name, "engine": "mpi", "mpi_ranks": "4"}
+        )
+        assert res_mpi_conv.status_code == 200, f"MPI Convolution failed for {f_name}: {res_mpi_conv.status_code}"
+    print(f"[TEST 6 PASS] Convolution MPI: All {len(FILTER_REGISTRY)} filters executed successfully with halo exchange")
 
     # 7. Frontend Endpoints
     res_index = client.get("/")

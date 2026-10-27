@@ -89,91 +89,150 @@ def run_mpi_native():
         comm.Gatherv(local_gray, [output_image, recvcounts, r_displs, MPI.UINT8_T], root=0)
 
     else:
-        # 2D Convolution with Halo Exchange
+        # 2D Stencil Convolution with MPI Halo Exchange (Preserves Full RGB Color)
         filter_matrix = FILTER_REGISTRY.get(args.filter, {}).get("kernel", np.ones((3, 3), dtype=np.float32) / 9.0)
         radius = filter_matrix.shape[0] // 2
 
-        # Convert full image to grayscale on rank 0 for convolution
-        gray_source = None
-        if rank == 0:
-            r = full_image[:, :, 0].astype(np.float32)
-            g = full_image[:, :, 1].astype(np.float32)
-            b = full_image[:, :, 2].astype(np.float32)
-            gray_source = np.clip(0.299 * r + 0.587 * g + 0.114 * b, 0, 255).astype(np.uint8)
+        is_edge = args.filter == "edge_detection_3x3"
 
-        local_interior = np.empty((local_rows, w), dtype=np.uint8)
-        sendcounts = [cnt * w for cnt in row_counts]
-        displs = [st * w for st in row_starts]
-        comm.Scatterv([gray_source, sendcounts, displs, MPI.UINT8_T], local_interior, root=0)
+        if is_edge:
+            # Monochrome Edge Detection on Luminance
+            gray_source = None
+            if rank == 0:
+                r = full_image[:, :, 0].astype(np.float32)
+                g = full_image[:, :, 1].astype(np.float32)
+                b = full_image[:, :, 2].astype(np.float32)
+                gray_source = np.clip(0.299 * r + 0.587 * g + 0.114 * b, 0, 255).astype(np.uint8)
 
-        # Halo Exchange (MPI_Sendrecv)
-        top_ghost = np.empty((radius, w), dtype=np.uint8)
-        bot_ghost = np.empty((radius, w), dtype=np.uint8)
+            local_interior = np.empty((local_rows, w), dtype=np.uint8)
+            sendcounts = [cnt * w for cnt in row_counts]
+            displs = [st * w for st in row_starts]
+            comm.Scatterv([gray_source, sendcounts, displs, MPI.UINT8_T], local_interior, root=0)
 
-        # Exchange top halo with rank-1
-        if rank > 0:
-            comm.Sendrecv(
-                sendbuf=local_interior[:radius, :],
-                dest=rank - 1,
-                sendtag=10,
-                recvbuf=top_ghost,
-                source=rank - 1,
-                recvtag=20
-            )
-        else:
-            top_ghost = np.repeat(local_interior[0:1, :], radius, axis=0)
+            # Halo Exchange (MPI_Sendrecv) 2D
+            top_ghost = np.empty((radius, w), dtype=np.uint8)
+            bot_ghost = np.empty((radius, w), dtype=np.uint8)
 
-        # Exchange bottom halo with rank+1
-        if rank < size - 1:
-            comm.Sendrecv(
-                sendbuf=local_interior[-radius:, :],
-                dest=rank + 1,
-                sendtag=20,
-                recvbuf=bot_ghost,
-                source=rank + 1,
-                recvtag=10
-            )
-        else:
-            bot_ghost = np.repeat(local_interior[-1:, :], radius, axis=0)
+            if rank > 0:
+                comm.Sendrecv(
+                    sendbuf=local_interior[:radius, :],
+                    dest=rank - 1,
+                    sendtag=10,
+                    recvbuf=top_ghost,
+                    source=rank - 1,
+                    recvtag=20
+                )
+            else:
+                top_ghost = np.repeat(local_interior[0:1, :], radius, axis=0)
 
-        # Build augmented local slab
-        aug_slab = np.vstack([top_ghost, local_interior, bot_ghost])
+            if rank < size - 1:
+                comm.Sendrecv(
+                    sendbuf=local_interior[-radius:, :],
+                    dest=rank + 1,
+                    sendtag=20,
+                    recvbuf=bot_ghost,
+                    source=rank + 1,
+                    recvtag=10
+                )
+            else:
+                bot_ghost = np.repeat(local_interior[-1:, :], radius, axis=0)
 
-        # Local convolution
-        t_comp_start = MPI.Wtime()
-        local_out = np.empty((local_rows, w), dtype=np.uint8)
-        k_h, k_w = filter_matrix.shape
-        f_mat = filter_matrix.astype(np.float32)
+            aug_slab = np.vstack([top_ghost, local_interior, bot_ghost])
 
-        for i in range(local_rows):
-            row_center = i + radius
-            sum_val = np.zeros(w, dtype=np.float32)
+            t_comp_start = MPI.Wtime()
+            k_h, k_w = filter_matrix.shape
+            f_mat = filter_matrix.astype(np.float32)
+
+            output = np.zeros((local_rows, w), dtype=np.float32)
             for ki in range(k_h):
-                ky = ki - radius
-                slab_y = row_center + ky
-                row_data = aug_slab[slab_y, :]
                 for kj in range(k_w):
-                    kx = kj - radius
                     weight = f_mat[ki, kj]
-                    if weight == 0:
+                    if weight == 0.0:
                         continue
+                    slab_slice = aug_slab[ki : ki + local_rows, :]
+                    kx = kj - radius
                     if kx < 0:
-                        shifted = np.pad(row_data[:-abs(kx)], (abs(kx), 0), mode='edge')
+                        shifted = np.pad(slab_slice[:, :kx], ((0, 0), (abs(kx), 0)), mode='edge')
                     elif kx > 0:
-                        shifted = np.pad(row_data[kx:], (0, kx), mode='edge')
+                        shifted = np.pad(slab_slice[:, kx:], ((0, 0), (0, kx)), mode='edge')
                     else:
-                        shifted = row_data
-                    sum_val += shifted.astype(np.float32) * weight
-            np.clip(sum_val, 0, 255, out=sum_val)
-            local_out[i, :] = sum_val.astype(np.uint8)
+                        shifted = slab_slice
+                    output += shifted.astype(np.float32) * weight
 
-        t_comp = MPI.Wtime() - t_comp_start
+            np.clip(output, 0, 255, out=output)
+            local_out = output.astype(np.uint8)
+            t_comp = MPI.Wtime() - t_comp_start
 
-        # Gather
-        output_image = np.empty((h, w), dtype=np.uint8) if rank == 0 else None
-        recvcounts = [cnt * w for cnt in row_counts]
-        r_displs = [st * w for st in row_starts]
-        comm.Gatherv(local_out, [output_image, recvcounts, r_displs, MPI.UINT8_T], root=0)
+            output_image = np.empty((h, w), dtype=np.uint8) if rank == 0 else None
+            recvcounts = [cnt * w for cnt in row_counts]
+            r_displs = [st * w for st in row_starts]
+            comm.Gatherv(local_out, [output_image, recvcounts, r_displs, MPI.UINT8_T], root=0)
+
+        else:
+            # Full 3D RGB Stencil Convolution
+            local_interior = np.empty((local_rows, w, 3), dtype=np.uint8)
+            sendcounts = [cnt * w * 3 for cnt in row_counts]
+            displs = [st * w * 3 for st in row_starts]
+            comm.Scatterv([full_image, sendcounts, displs, MPI.UINT8_T], local_interior, root=0)
+
+            # Halo Exchange (MPI_Sendrecv) 3D
+            top_ghost = np.empty((radius, w, 3), dtype=np.uint8)
+            bot_ghost = np.empty((radius, w, 3), dtype=np.uint8)
+
+            if rank > 0:
+                comm.Sendrecv(
+                    sendbuf=local_interior[:radius, :, :],
+                    dest=rank - 1,
+                    sendtag=10,
+                    recvbuf=top_ghost,
+                    source=rank - 1,
+                    recvtag=20
+                )
+            else:
+                top_ghost = np.repeat(local_interior[0:1, :, :], radius, axis=0)
+
+            if rank < size - 1:
+                comm.Sendrecv(
+                    sendbuf=local_interior[-radius:, :, :],
+                    dest=rank + 1,
+                    sendtag=20,
+                    recvbuf=bot_ghost,
+                    source=rank + 1,
+                    recvtag=10
+                )
+            else:
+                bot_ghost = np.repeat(local_interior[-1:, :, :], radius, axis=0)
+
+            aug_slab = np.vstack([top_ghost, local_interior, bot_ghost])
+
+            t_comp_start = MPI.Wtime()
+            k_h, k_w = filter_matrix.shape
+            f_mat = filter_matrix.astype(np.float32)
+
+            output = np.zeros((local_rows, w, 3), dtype=np.float32)
+            for ki in range(k_h):
+                for kj in range(k_w):
+                    weight = f_mat[ki, kj]
+                    if weight == 0.0:
+                        continue
+                    slab_slice = aug_slab[ki : ki + local_rows, :, :]
+                    kx = kj - radius
+                    if kx < 0:
+                        shifted = np.pad(slab_slice[:, :kx, :], ((0, 0), (abs(kx), 0), (0, 0)), mode='edge')
+                    elif kx > 0:
+                        shifted = np.pad(slab_slice[:, kx:, :], ((0, 0), (0, kx), (0, 0)), mode='edge')
+                    else:
+                        shifted = slab_slice
+                    output += shifted.astype(np.float32) * weight
+
+            np.clip(output, 0, 255, out=output)
+            local_out = output.astype(np.uint8)
+            t_comp = MPI.Wtime() - t_comp_start
+
+            output_image = np.empty((h, w, 3), dtype=np.uint8) if rank == 0 else None
+            recvcounts = [cnt * w * 3 for cnt in row_counts]
+            r_displs = [st * w * 3 for st in row_starts]
+            comm.Gatherv(local_out, [output_image, recvcounts, r_displs, MPI.UINT8_T], root=0)
 
     t_total = MPI.Wtime() - t_start
 

@@ -84,26 +84,33 @@ def _worker_convolution(
     """
     Rank worker: convolves augmented slab (interior + halo rows).
     Produces output slab corresponding strictly to the interior rows.
-    Uses ultra-fast 2D array vectorization across stencil offsets.
+    Supports both 2D grayscale and 3D RGB color images.
+    Uses ultra-fast 2D/3D array vectorization across stencil offsets.
     """
     t0 = time.perf_counter()
-    aug_h, width = augmented_slab.shape
+    is_2d = augmented_slab.ndim == 2
+    if is_2d:
+        aug_3d = augmented_slab[:, :, np.newaxis]
+    else:
+        aug_3d = augmented_slab
+
+    aug_h, width, channels = aug_3d.shape
     int_h = aug_h - 2 * radius
     k_h, k_w = filter_matrix.shape
     f_mat = filter_matrix.astype(np.float32)
 
-    output = np.zeros((int_h, width), dtype=np.float32)
+    output = np.zeros((int_h, width, channels), dtype=np.float32)
     for ki in range(k_h):
         for kj in range(k_w):
             w = f_mat[ki, kj]
             if w == 0.0:
                 continue
-            slab_slice = augmented_slab[ki : ki + int_h, :]
+            slab_slice = aug_3d[ki : ki + int_h, :, :]
             kx = kj - radius
             if kx < 0:
-                shifted = np.pad(slab_slice[:, :kx], ((0, 0), (abs(kx), 0)), mode='edge')
+                shifted = np.pad(slab_slice[:, :kx, :], ((0, 0), (abs(kx), 0), (0, 0)), mode='edge')
             elif kx > 0:
-                shifted = np.pad(slab_slice[:, kx:], ((0, 0), (0, kx)), mode='edge')
+                shifted = np.pad(slab_slice[:, kx:, :], ((0, 0), (0, kx), (0, 0)), mode='edge')
             else:
                 shifted = slab_slice
             output += shifted.astype(np.float32) * w
@@ -111,6 +118,9 @@ def _worker_convolution(
     np.clip(output, 0, 255, out=output)
     output_uint8 = output.astype(np.uint8)
     elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+    if is_2d:
+        return output_uint8[:, :, 0], elapsed_ms
     return output_uint8, elapsed_ms
 
 
@@ -237,10 +247,13 @@ class MPIEngine:
     ) -> Dict[str, Any]:
         """
         Executes 2D Stencil Convolution using 1D domain decomposition + Ghost/Halo Cell Exchange.
+        Supports both 3D RGB and 2D Grayscale inputs seamlessly without loss of color.
         """
         from concurrent.futures import ProcessPoolExecutor
 
-        height, width, _ = rgb_image.shape
+        is_2d = rgb_image.ndim == 2
+        height, width = rgb_image.shape[:2]
+        channels = 1 if is_2d else rgb_image.shape[2]
         num_ranks = max(1, min(num_ranks, height, os.cpu_count() or 8))
         k_size = filter_matrix.shape[0]
         radius = k_size // 2
@@ -249,24 +262,23 @@ class MPIEngine:
 
         logs = [
             f"[{_get_timestamp()}] [MPI INIT] Initializing MPI Communicator with P = {num_ranks} ranks",
-            f"[{_get_timestamp()}] [MPI DOMAIN] Image: {width}x{height} px | Filter: {k_size}x{k_size} (Halo Radius R = {radius} rows)",
+            f"[{_get_timestamp()}] [MPI DOMAIN] Image: {width}x{height} px, {channels} ch | Filter: {k_size}x{k_size} (Halo Radius R = {radius} rows)",
         ]
 
         t_start_total = time.perf_counter()
-
-        # Step 0: Convert input to grayscale for convolution
-        r = rgb_image[:, :, 0].astype(np.float32)
-        g = rgb_image[:, :, 1].astype(np.float32)
-        b = rgb_image[:, :, 2].astype(np.float32)
-        gray_full = np.clip(0.299 * r + 0.587 * g + 0.114 * b, 0, 255).astype(np.uint8)
 
         # Step 1: Rank 0 Slices (MPI_Scatterv)
         t_start_scatter = time.perf_counter()
         interior_slabs = []
         for r, (s, e) in enumerate(bounds):
-            interior_slabs.append(gray_full[s:e, :])
+            if is_2d:
+                slab = rgb_image[s:e, :]
+            else:
+                slab = rgb_image[s:e, :, :]
+            interior_slabs.append(slab)
+            bytes_count = (e - s) * width * channels
             logs.append(
-                f"[{_get_timestamp()}] [MPI_Scatterv] Rank {r} assigned rows [{s}..{e - 1}] ({e - s} rows)"
+                f"[{_get_timestamp()}] [MPI_Scatterv] Rank {r} assigned rows [{s}..{e - 1}] ({e - s} rows, {bytes_count / 1024:.1f} KB)"
             )
         t_scatter_ms = (time.perf_counter() - t_start_scatter) * 1000.0
 
@@ -282,30 +294,38 @@ class MPIEngine:
 
             # Top halo: from rank r-1 or clamped if r == 0
             if r == 0:
-                # Rank 0 clamps top boundary
-                top_halo = np.repeat(local_slab[0:1, :], radius, axis=0)
+                if is_2d:
+                    top_halo = np.repeat(local_slab[0:1, :], radius, axis=0)
+                else:
+                    top_halo = np.repeat(local_slab[0:1, :, :], radius, axis=0)
                 logs.append(
                     f"[{_get_timestamp()}] [MPI HALO] Rank 0: Top boundary clamped ({radius} ghost rows)"
                 )
             else:
-                # Ghost cells received from Rank (r-1) bottom interior
                 prev_slab = interior_slabs[r - 1]
-                top_halo = prev_slab[-radius:, :]
+                if is_2d:
+                    top_halo = prev_slab[-radius:, :]
+                else:
+                    top_halo = prev_slab[-radius:, :, :]
                 logs.append(
                     f"[{_get_timestamp()}] [MPI_Sendrecv] Rank {r} exchanged top halo with Rank {r - 1} ({radius} rows)"
                 )
 
             # Bottom halo: from rank r+1 or clamped if r == num_ranks - 1
             if r == num_ranks - 1:
-                # Last rank clamps bottom boundary
-                bottom_halo = np.repeat(local_slab[-1:, :], radius, axis=0)
+                if is_2d:
+                    bottom_halo = np.repeat(local_slab[-1:, :], radius, axis=0)
+                else:
+                    bottom_halo = np.repeat(local_slab[-1:, :, :], radius, axis=0)
                 logs.append(
                     f"[{_get_timestamp()}] [MPI HALO] Rank {r}: Bottom boundary clamped ({radius} ghost rows)"
                 )
             else:
-                # Ghost cells received from Rank (r+1) top interior
                 next_slab = interior_slabs[r + 1]
-                bottom_halo = next_slab[:radius, :]
+                if is_2d:
+                    bottom_halo = next_slab[:radius, :]
+                else:
+                    bottom_halo = next_slab[:radius, :, :]
                 logs.append(
                     f"[{_get_timestamp()}] [MPI_Sendrecv] Rank {r} exchanged bottom halo with Rank {r + 1} ({radius} rows)"
                 )
@@ -351,7 +371,7 @@ class MPIEngine:
         t_comm_ms = t_scatter_ms + t_halo_ms + t_gather_ms
 
         logs.append(
-            f"[{_get_timestamp()}] [MPI_Gatherv] Rank 0 assembled convolved image ({width}x{height} px)"
+            f"[{_get_timestamp()}] [MPI_Gatherv] Rank 0 assembled convolved image ({width}x{height} px, {channels} ch)"
         )
         logs.append(
             f"[{_get_timestamp()}] [MPI BENCHMARK] P = {num_ranks} ranks | Compute: {t_compute_ms:.2f} ms | Comm+Halo: {t_comm_ms:.2f} ms | Total: {t_total_ms:.2f} ms"

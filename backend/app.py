@@ -12,6 +12,7 @@ Provides REST endpoints for:
 import os
 import sys
 import time
+import numpy as np
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -27,7 +28,8 @@ from backend.mpi_engine import MPIEngine
 from backend.cpu_engine import (
     cpu_rgb_to_grayscale,
     cpu_rgb_to_grayscale_scalar,
-    cpu_image_convolution_2d
+    cpu_image_convolution_2d,
+    cpu_image_convolution_2d_scalar
 )
 from backend.utils import (
     get_gpu_hardware_info,
@@ -129,8 +131,19 @@ async def process_image(
         if filter_name not in FILTER_REGISTRY:
             raise HTTPException(status_code=400, detail=f"Unknown filter: {filter_name}")
         filter_matrix = FILTER_REGISTRY[filter_name]["kernel"]
-        cpu_output, t_cpu_ms = cpu_image_convolution_2d(rgb_image, filter_matrix)
-        cpu_mode_name = f"Sequential CPU Stencil Convolution ({filter_name})"
+
+        # Standard edge detection computes spatial derivatives on luminance, producing the classic 2D monochrome edge map
+        if filter_name == "edge_detection_3x3":
+            conv_input, _ = cpu_rgb_to_grayscale(rgb_image)
+        else:
+            conv_input = rgb_image
+
+        if use_scalar_cpu:
+            cpu_output, t_cpu_ms = cpu_image_convolution_2d_scalar(conv_input, filter_matrix)
+            cpu_mode_name = f"Sequential Single-Threaded Scalar CPU Convolution ({filter_name})"
+        else:
+            cpu_output, t_cpu_ms = cpu_image_convolution_2d(conv_input, filter_matrix)
+            cpu_mode_name = f"Sequential CPU Stencil Convolution ({filter_name})"
     else:
         raise HTTPException(status_code=400, detail=f"Unsupported operation: {operation}")
 
@@ -146,7 +159,7 @@ async def process_image(
             accel_result = cuda_engine.execute_grayscale(rgb_image, block_dim=block_dim)
         else:
             filter_matrix = FILTER_REGISTRY[filter_name]["kernel"]
-            accel_result = cuda_engine.execute_convolution(rgb_image, filter_matrix, block_dim=block_dim)
+            accel_result = cuda_engine.execute_convolution(conv_input, filter_matrix, block_dim=block_dim)
 
         gpu_metrics = accel_result["metrics"]
         t_kernel_ms = gpu_metrics["t_kernel_ms"]
@@ -189,7 +202,7 @@ async def process_image(
             accel_result = mpi_engine.execute_grayscale(rgb_image, num_ranks=num_ranks)
         else:
             filter_matrix = FILTER_REGISTRY[filter_name]["kernel"]
-            accel_result = mpi_engine.execute_convolution(rgb_image, filter_matrix, num_ranks=num_ranks)
+            accel_result = mpi_engine.execute_convolution(conv_input, filter_matrix, num_ranks=num_ranks)
 
         mpi_metrics = accel_result["metrics"]
         t_compute_ms = mpi_metrics["t_compute_ms"]
@@ -229,8 +242,17 @@ async def process_image(
         )
         output_image = accel_result["output_image"]
 
-    # 4. Base64 Encode Output Image
-    encoded_output = encode_image_base64(output_image)
+    # 4. Contrast enhancement for edge detection so contours are vividly visible
+    display_output = output_image
+    if operation == "convolution" and filter_name == "edge_detection_3x3":
+        if np.any(output_image > 0):
+            pos_pixels = output_image[output_image > 0]
+            p_val = float(np.percentile(pos_pixels, 99.0))
+            scale = max(255.0 / max(p_val, 1.0), 3.0)
+            display_output = np.clip(output_image.astype(np.float32) * scale, 0, 255).astype(np.uint8)
+
+    # 5. Base64 Encode Output Image
+    encoded_output = encode_image_base64(display_output)
     encoded_input_preview = encode_image_base64(rgb_image)
 
     return JSONResponse(content={

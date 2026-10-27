@@ -66,12 +66,12 @@ FILTER_REGISTRY = {
     },
     "edge_detection_3x3": {
         "name": "Laplacian Edge Detection (3x3)",
-        "description": "Second-order spatial derivative detecting sudden intensity transitions",
+        "description": "Isotropic 8-neighbor second-order spatial derivative detecting intensity transitions",
         "size": 3,
         "kernel": np.array([
-            [ 0.0,  1.0,  0.0],
-            [ 1.0, -4.0,  1.0],
-            [ 0.0,  1.0,  0.0]
+            [-1.0, -1.0, -1.0],
+            [-1.0,  8.0, -1.0],
+            [-1.0, -1.0, -1.0]
         ], dtype=np.float32)
     },
     "emboss_3x3": {

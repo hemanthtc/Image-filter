@@ -123,3 +123,45 @@ def cpu_image_convolution_2d(image: np.ndarray, filter_matrix: np.ndarray) -> tu
     if is_2d:
         return output[:, :, 0], elapsed_ms
     return output, elapsed_ms
+
+
+def cpu_image_convolution_2d_scalar(image: np.ndarray, filter_matrix: np.ndarray) -> tuple[np.ndarray, float]:
+    """
+    Pure scalar nested-loop CPU baseline for 2D convolution.
+    Demonstrates single-threaded instruction-level execution without vectorized SIMD.
+    """
+    is_2d = image.ndim == 2
+    if is_2d:
+        img_3d = image[:, :, np.newaxis]
+    else:
+        img_3d = image
+
+    height, width, channels = img_3d.shape
+    k_size = filter_matrix.shape[0]
+    half_k = k_size // 2
+
+    output = np.empty((height, width, channels), dtype=np.uint8)
+    start_time = time.perf_counter()
+
+    f_mat = filter_matrix.astype(np.float32)
+
+    for r in range(height):
+        for c in range(width):
+            for ch in range(channels):
+                val = 0.0
+                for f_r in range(-half_k, half_k + 1):
+                    for f_c in range(-half_k, half_k + 1):
+                        in_r = max(0, min(height - 1, r + f_r))
+                        in_c = max(0, min(width - 1, c + f_c))
+                        val += float(img_3d[in_r, in_c, ch]) * float(f_mat[f_r + half_k, f_c + half_k])
+                if val < 0.0:
+                    val = 0.0
+                elif val > 255.0:
+                    val = 255.0
+                output[r, c, ch] = int(val)
+
+    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+    if is_2d:
+        return output[:, :, 0], elapsed_ms
+    return output, elapsed_ms
+

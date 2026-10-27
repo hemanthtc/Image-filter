@@ -128,7 +128,7 @@ class CUDAEngine:
                 logs.append(f"[{_get_timestamp()}] [CUDA MALLOC] Allocating Device VRAM: d_rgb ({rgb_image.nbytes} bytes) and d_gray ({width * height} bytes)")
                 
                 # cudaMemcpyHostToDevice
-                d_rgb = cp.asarray(rgb_image)
+                d_rgb = cp.ascontiguousarray(cp.asarray(rgb_image))
                 d_gray = cp.empty((height, width), dtype=np.uint8)
                 cp.cuda.Stream.null.synchronize()
                 t_h2d_ms = (time.perf_counter() - t0_h2d) * 1000.0
@@ -221,9 +221,9 @@ class CUDAEngine:
                 t0_h2d = time.perf_counter()
                 logs.append(f"[{_get_timestamp()}] [CUDA MALLOC] Allocating Device VRAM: d_input, d_output, and d_filter ({filter_matrix.nbytes} bytes)")
                 
-                d_input = cp.asarray(image)
+                d_input = cp.ascontiguousarray(cp.asarray(image))
                 d_output = cp.empty_like(d_input)
-                d_filter = cp.asarray(filter_matrix, dtype=cp.float32)
+                d_filter = cp.ascontiguousarray(cp.asarray(filter_matrix, dtype=cp.float32))
                 cp.cuda.Stream.null.synchronize()
                 t_h2d_ms = (time.perf_counter() - t0_h2d) * 1000.0
                 logs.append(f"[{_get_timestamp()}] [H2D MEMCPY] cudaMemcpyHostToDevice completed ({image.nbytes / 1024:.1f} KB) in {t_h2d_ms:.3f} ms")
